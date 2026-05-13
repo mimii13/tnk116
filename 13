@@ -1,0 +1,297 @@
+#!/usr/bin/python
+
+from colorama import Fore, Back, Cursor, Style, init
+import select
+import random
+import sys
+import time
+import os
+import serial
+import socket
+import json
+
+##############################################
+##                                          ##
+##                Variables                 ##
+##                                          ##
+##############################################
+# Network variables.
+id = 123  # Set your three digits from your LiU-ID here.
+host = '130.236.81.13'
+port = 8718
+
+ser = serial.Serial('/dev/ttyACM0',9600)
+
+# Temperature variables.
+temperature = 0.0
+tempThresh = 18
+
+# Humidity variables.
+humidity = 0.0
+humidThresh = 50
+
+# Input command variable.
+command = None
+
+# Update variables
+updateFrequency=1 # seconds.
+lastUpdated = None
+
+##############################################
+##                                          ##
+##              Main function               ##
+##                                          ##
+##############################################
+
+def main():
+    init()
+    printMenu()
+    ser.read(ser.inWaiting())
+    while True:
+            try:
+                readMeasurements()
+                sendInstructions()
+                getInput()
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as e:
+                print(e)
+
+##############################################
+##                                          ##
+##        Functions for assignment 2        ##
+##                                          ##
+##############################################
+
+def readMeasurements():
+    global lastUpdated
+    global temperature
+    global humidity
+
+    if (lastUpdated is None or
+    (lastUpdated is not None and int(time.time()-lastUpdated)>updateFrequency)):
+
+        while ser.inWaiting() >= 12:
+
+            # Reading 12 bytes from serial
+            data = ser.read(12).decode()
+
+            # Example format:
+            # +23.45+56.78
+
+            # Extracting values
+            temperature = float(data[0:6])
+            humidity = float(data[6:12])
+
+        sendMeasurements()
+        updateTerminalMetrics()
+        lastUpdated = time.time()
+
+
+def sendInstructions():
+
+    # Create bytearray with 2 bytes
+    instructions = bytearray(2)
+
+    # Threshold logic
+    if temperature > tempThresh or humidity > humidThresh:
+        instructions[0] = 0
+        instructions[1] = 1
+    else:
+        instructions[0] = 1
+        instructions[1] = 0
+
+    # Send instructions to Arduino
+    ser.write(instructions)
+
+##############################################
+##                                          ##
+##        Functions for assignment 3        ##
+##                                          ##
+##############################################
+
+def sendMeasurements():
+    global tempThresh
+    global humidThresh
+
+    # Create request dictionary
+    request = {
+        "message_type": "TNK116UpdateMeasurements",
+        "id": id,
+        "temperature": temperature,
+        "humidity": humidity
+    }
+
+    response = sendToServer(request)
+
+    # Update thresholds if response is valid
+    if response["message_type"] != "ERROR":
+        tempThresh = response["temperature_threshold"]
+        humidThresh = response["humidity_threshold"]
+
+
+def updateThreshold(type,value):
+
+    # Create request dictionary
+    request = {
+        "message_type": "TNK116SetThreshold",
+        "id": id,
+        "type": type,
+        "value": value
+    }
+
+    response = sendToServer(request)
+
+    # Return success value
+    if response["message_type"] != "ERROR":
+        return response["success"]
+
+    return False
+
+
+def sendToServer(request):
+
+    # Create socket and connect
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((host, port))
+
+    # Convert dictionary to JSON and append |
+    message = json.dumps(request) + "|"
+
+    # Send message
+    sock.send(message.encode())
+
+    # Receive response
+    receive = sock.recv(4096)
+
+    # Close socket
+    sock.close()
+
+    # Convert bytes -> string -> JSON
+    responseString = receive.decode().rstrip("|")
+    response = json.loads(responseString)
+
+    return response
+
+##############################################
+##                                          ##
+##              Input functions             ##
+##                                          ##
+##############################################
+
+def getInput():
+    global command
+    global tempThresh
+    global humidThresh
+
+    if command is None:
+        printMenuSelector(0)
+        command = ""
+
+    if '\n' in command:
+        choise = command.strip()
+
+        if choise == '1':
+            printMenuSelector("Set temperature threshhold ({}): "
+                              .format(tempThresh))
+            value = input()
+            value = float(value.replace(',','.'))
+            if updateThreshold('temperature',value):
+                tempThresh = value
+
+        elif choise == '2':
+            printMenuSelector("Set humidity threshhold ({}): "
+                              .format(humidThresh))
+            value = input()
+            value = float(value.replace(',','.'))
+            if updateThreshold('humidity',value):
+                humidThresh = value
+
+        elif choise == '3':
+            printMenuSelector("Exiting...\n")
+            sys.exit()
+
+        command = None
+        return
+
+    readReady, writeReady, exceptReady = select.select([sys.stdin], [], [],1)
+
+    if len(readReady):
+        line = sys.stdin.readline()
+        command = command+line
+        return
+
+##############################################
+##                                          ##
+##            Graphical functions           ##
+##                                          ##
+##############################################
+
+def printMenu():
+    os.system('clear')
+
+    sys.stdout.write('{message:#<33}\n'.format(message=""))
+    sys.stdout.write('#{}#\n'.format("Temperature gateway".center(31," ")))
+    sys.stdout.write('{message:#<33}\n'.format(message=""))
+    sys.stdout.write("# Temp: 00.00\t   Humid: 00.00 #\n")
+    sys.stdout.write("{message:#<33}\n".format(message=""))
+
+    menu = {}
+    menu['1'] = "Set temperature threshold."
+    menu['2'] = "Set Humidity threshold."
+    menu['3'] = "Exit."
+
+    menuItems=menu.keys()
+    for menuItem in menuItems:
+        sys.stdout.write("#{message: <31}#\n".format(message="{}. {}"
+                         .format(menuItem,menu[menuItem])))
+    sys.stdout.write("#{message: <31}#\n".format(message=""))
+    sys.stdout.write("{message:#<33}\n".format(message=""))
+    sys.stdout.flush()
+
+def updateTerminalMetrics():
+
+        sys.stdout.write("\033[s")
+
+        sys.stdout.write("\033[4;9H")
+        if temperature > tempThresh:
+            sys.stdout.write(Fore.RED)
+        sys.stdout.write("{:.2f}".format(temperature))
+        sys.stdout.write(Style.RESET_ALL)
+
+        sys.stdout.write("\033[4;27H")
+        if humidity > humidThresh:
+            sys.stdout.write(Fore.RED)
+        sys.stdout.write("{:.2f}".format(humidity))
+        sys.stdout.write(Style.RESET_ALL)
+
+        sys.stdout.write("\033[u")
+        sys.stdout.flush()
+
+def printMenuSelector(question):
+
+    sys.stdout.write("\033[11;0H")
+
+    sys.stdout.write("\033[K")
+    if question == 0:
+        question = "Please select: "
+
+    sys.stdout.write(question)
+
+    sys.stdout.flush()
+
+def debug(text):
+
+    sys.stdout.write("\033[s")
+
+    sys.stdout.write("\033[20;0H")
+
+    sys.stdout.write("\033[K")
+
+    sys.stdout.write("DEBUG: {}".format(text))
+
+    sys.stdout.write("\033[u")
+    sys.stdout.flush()
+
+if __name__=="__main__":
+    main()
